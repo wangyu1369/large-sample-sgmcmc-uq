@@ -635,14 +635,14 @@ if __name__ == "__main__":
     # Config
     # ------------------------
     DIMENSION = 20
-    SAMPLE_SIZE = 2000
+    SAMPLE_SIZE = 5000
 
     BETA = 1.5
     SIGMA_WORKING = 1.0
     N_MC = 50
 
     NUM_EPOCHS = 30
-    B_LIST = (16, int(0.3 * SAMPLE_SIZE))
+    B_LIST = (16, int(0.1 * SAMPLE_SIZE))
 
     OUTLIER_FRAC = 0.1
     OUTLIER_SCALE = 5.0
