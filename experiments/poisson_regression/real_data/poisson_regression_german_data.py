@@ -4,8 +4,6 @@ import matplotlib.pyplot as plt
 
 from typing import Dict, Tuple, Optional, List
 
-from scipy.special import gammaln
-from scipy.stats import norm
 import statsmodels.api as sm
 
 from sklearn.model_selection import train_test_split
@@ -70,8 +68,8 @@ def load_german_credit(
       5. optionally adds an intercept column.
 
     The response is converted to nonnegative numeric values for Poisson GLM.
-    If labels are {1, 2}, they are mapped to {1, 0} by default,
-    treating Creditability == 1 as the positive class.
+    If labels are {1, 2}, they are mapped to {1, 0}, treating
+    Creditability == 1 as the positive class.
     """
     df = pd.read_csv(path, sep=None, engine="python")
 
@@ -84,32 +82,23 @@ def load_german_credit(
     y_raw = df[target_col].to_numpy()
     X_df = df.drop(columns=[target_col])
 
-    # Convert target to numeric.
     y_unique = np.sort(pd.unique(y_raw))
 
     if set(y_unique) == {1, 2}:
-        # Common German Credit coding: 1/2.
-        # We map to {1, 0}; this keeps the Poisson response nonnegative.
         y = (y_raw == 1).astype(float)
     else:
         y = pd.to_numeric(pd.Series(y_raw), errors="raise").to_numpy(dtype=float)
 
-        # If binary labels are {0, 1}, keep them.
-        # If labels contain negative values, shift is not appropriate for classification,
-        # so raise an error.
         if np.min(y) < 0:
             raise ValueError("Poisson GLM requires nonnegative response values.")
 
-    # One-hot encode categorical columns.
     X_df = pd.get_dummies(X_df, drop_first=True)
 
     X = X_df.to_numpy(dtype=float)
 
-    # Standardize features.
     scaler = StandardScaler()
     X = scaler.fit_transform(X)
 
-    # Add intercept.
     if add_intercept:
         X = np.column_stack([np.ones(X.shape[0]), X])
 
@@ -141,7 +130,7 @@ def compute_J_V_at_mle(
 
     Both are sample averages.
     """
-    N, d = X.shape
+    N, _ = X.shape
 
     eta = np.clip(X @ mle, -clip, clip)
     mu = np.exp(eta)
@@ -172,13 +161,14 @@ def sandwich_covariance_scaled(
     J_reg = J + eps * np.eye(d)
 
     Jinv = np.linalg.inv(J_reg)
+
     sandwich = Jinv @ V @ Jinv
     sandwich = 0.5 * (sandwich + sandwich.T)
 
-    scaled = sandwich / N
-    scaled = 0.5 * (scaled + scaled.T)
+    scaled_sandwich = sandwich / N
+    scaled_sandwich = 0.5 * (scaled_sandwich + scaled_sandwich.T)
 
-    return sandwich, scaled
+    return sandwich, scaled_sandwich
 
 
 # =========================
@@ -187,7 +177,7 @@ def sandwich_covariance_scaled(
 
 def precond_CT(Jinv: np.ndarray) -> np.ndarray:
     """
-    Continuous-time baseline preconditioner.
+    CT preconditioner.
     """
     return Jinv
 
@@ -200,17 +190,20 @@ def precond_improved_quadratic_constant_noise(
     eps: float = 1e-8,
 ) -> np.ndarray:
     """
-    Discrete-quadratic + constant noise preconditioner.
+    DQ+const preconditioner.
 
-        Lambda = (1/N) (V J^{-1} + J^{-1} V) (C + V/N)^{-1}
+        Lambda = (1/N) (V J^{-1} + J^{-1} V) (C + V/N)^{-1},
 
     with C = J.
     """
     d = J.shape[0]
+
     C = J
     M = C + (1.0 / N) * V + eps * np.eye(d)
+    M = 0.5 * (M + M.T)
 
     Lambda = (1.0 / N) * (V @ Jinv + Jinv @ V) @ np.linalg.inv(M)
+
     return Lambda
 
 
@@ -222,7 +215,7 @@ def compute_taylor_quantities(
     clip: float = 30.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Computes C1, C2, P for the Taylor preconditioner.
+    Computes C1, C2, P for the DQ+Exact preconditioner.
     """
     N, d = X.shape
 
@@ -233,6 +226,7 @@ def compute_taylor_quantities(
     J = 0.5 * (J + J.T)
 
     errors = y - mu
+
     Ex = (errors @ X) / N
     E = Ex.reshape(d, 1) @ Ex.reshape(1, d)
 
@@ -240,6 +234,7 @@ def compute_taylor_quantities(
     C2 = 0.5 * (C2 + C2.T)
 
     C1 = np.zeros((d, d))
+
     for i in range(N):
         xi = X[i].reshape(d, 1)
         xxT = xi @ xi.T
@@ -264,7 +259,7 @@ def precond_taylor(
     eps: float = 1e-8,
 ) -> np.ndarray:
     """
-    Taylor preconditioner.
+    DQ+Exact preconditioner.
 
         C = (C1 + C2) / B
         Lambda = (P + P^T) (C + J cov J)^{-1}
@@ -276,6 +271,7 @@ def precond_taylor(
     denom = 0.5 * (denom + denom.T) + eps * np.eye(d)
 
     Lambda = (P + P.T) @ np.linalg.inv(denom)
+
     return Lambda
 
 
@@ -297,10 +293,10 @@ def sgd_poisson(
     clip: float = 30.0,
 ) -> np.ndarray:
     """
-    SGD-like update.
+    Preconditioned stochastic-gradient updates for Poisson regression.
 
     If approximate_loss=False:
-        uses Poisson minibatch gradient.
+        uses Poisson minibatch score.
 
     If approximate_loss=True:
         uses quadratic approximation around mle.
@@ -323,8 +319,7 @@ def sgd_poisson(
             eta = np.clip(Xb @ theta, -clip, clip)
             mu = np.exp(eta)
 
-            # This follows the sign convention in your original code:
-            # grad = score = (y - mu) x
+            # Score convention: grad = (y - mu) x.
             grad = ((yb - mu)[:, None] * Xb).mean(axis=0)
         else:
             mu_mle = np.exp(np.clip(Xb @ mle, -clip, clip))
@@ -362,23 +357,14 @@ def post_burnin_samples(
     return path[start::thin].copy()
 
 
-def param_error(
-    samples: np.ndarray,
-    theta_target: np.ndarray,
-    eps: float = 1e-12,
-) -> float:
-    mu = samples.mean(axis=0)
-    return float(
-        np.linalg.norm(mu - theta_target)
-        / (np.linalg.norm(theta_target) + eps)
-    )
-
-
 def cov_frob_error(
     samples: np.ndarray,
     cov_target: np.ndarray,
     eps: float = 1e-12,
 ) -> float:
+    """
+    Relative Frobenius covariance error.
+    """
     cov_hat = np.cov(samples.T, bias=True)
     cov_hat = 0.5 * (cov_hat + cov_hat.T)
 
@@ -388,69 +374,23 @@ def cov_frob_error(
     )
 
 
-def quantile_calib_rmse(
-    samples: np.ndarray,
-    mean: np.ndarray,
-    cov: np.ndarray,
-    q_list=(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99),
-    jitter: float = 1e-8,
-) -> float:
-    d = cov.shape[0]
-    cov_stable = 0.5 * (cov + cov.T) + jitter * np.eye(d)
-
-    try:
-        L = np.linalg.cholesky(cov_stable)
-    except np.linalg.LinAlgError:
-        vals, vecs = np.linalg.eigh(cov_stable)
-        vals = np.maximum(vals, jitter)
-        cov_stable = vecs @ np.diag(vals) @ vecs.T
-        L = np.linalg.cholesky(cov_stable)
-
-    z = np.linalg.solve(L, (samples - mean).T).T
-
-    q = np.array(q_list)
-    zq_target = norm.ppf(q)
-    zq_emp = np.quantile(z, q, axis=0)
-
-    diff = zq_emp - zq_target.reshape(-1, 1)
-    rmse_dim = np.sqrt(np.mean(diff ** 2, axis=0))
-
-    return float(np.mean(rmse_dim))
-
-
-def poisson_test_nll(
-    theta: np.ndarray,
-    X: np.ndarray,
-    y: np.ndarray,
-    clip: float = 30.0,
-) -> float:
-    eta = np.clip(X @ theta, -clip, clip)
-    mu = np.exp(eta)
-
-    return float(np.mean(mu - y * eta + gammaln(y + 1.0)))
-
-
 def metrics_from_path(
     path: np.ndarray,
     mle: np.ndarray,
     cov_target: np.ndarray,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
     burnin_frac: float = 0.1,
     thin: int = 1,
 ) -> Optional[Dict[str, float]]:
+    """
+    Compute only covariance error.
+    """
     samples = post_burnin_samples(path, burnin_frac, thin)
 
     if samples.shape[0] < 5 or not is_finite(samples):
         return None
 
-    theta_bar = samples.mean(axis=0)
-
     return {
-        "param_error": param_error(samples, mle),
-        "quantile_calib_error": quantile_calib_rmse(samples, mle, cov_target),
         "cov_frob_error": cov_frob_error(samples, cov_target),
-        "test_nll": poisson_test_nll(theta_bar, X_test, y_test),
     }
 
 
@@ -459,16 +399,13 @@ def metrics_from_path(
 # =========================
 
 METHODS_ORDER = [
-    "continuous-time",
-    "discrete-quadratic+constant noise",
-    "taylor (this paper)",
+    "CT",
+    "DQ+const",
+    "DQ+Exact",
 ]
 
 METRICS = [
-    "param_error",
-    "quantile_calib_error",
     "cov_frob_error",
-    "test_nll",
 ]
 
 
@@ -486,12 +423,12 @@ def run_with_cis(
     Lambda_taylor_by_idx: Dict[int, np.ndarray],
     mle: np.ndarray,
     cov_target: np.ndarray,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
     burnin_frac: float = 0.1,
     thin: int = 1,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-
+    """
+    Run repeated experiments and summarize covariance error mean + 95% CI.
+    """
     N = X.shape[0]
     records = []
 
@@ -503,7 +440,7 @@ def run_with_cis(
         for i, B in enumerate(batch_sizes):
             n_steps = num_epochs * int(N / B)
 
-            # ---- Continuous-time
+            # ---- CT
             path_ct = sgd_poisson(
                 n_steps=n_steps,
                 batch_size=B,
@@ -521,23 +458,19 @@ def run_with_cis(
                 path_ct,
                 mle,
                 cov_target,
-                X_test,
-                y_test,
                 burnin_frac,
                 thin,
             )
 
             if m is not None:
-                records.append(
-                    {
-                        "rep": rep,
-                        "method": "continuous-time",
-                        "batch_size": int(B),
-                        **m,
-                    }
-                )
+                records.append({
+                    "rep": rep,
+                    "method": "CT",
+                    "batch_size": int(B),
+                    **m,
+                })
 
-            # ---- Discrete-quadratic + constant noise
+            # ---- DQ+const
             path_im = sgd_poisson(
                 n_steps=n_steps,
                 batch_size=B,
@@ -555,23 +488,19 @@ def run_with_cis(
                 path_im,
                 mle,
                 cov_target,
-                X_test,
-                y_test,
                 burnin_frac,
                 thin,
             )
 
             if m is not None:
-                records.append(
-                    {
-                        "rep": rep,
-                        "method": "discrete-quadratic+constant noise",
-                        "batch_size": int(B),
-                        **m,
-                    }
-                )
+                records.append({
+                    "rep": rep,
+                    "method": "DQ+const",
+                    "batch_size": int(B),
+                    **m,
+                })
 
-            # ---- Taylor this paper
+            # ---- DQ+Exact
             path_ta = sgd_poisson(
                 n_steps=n_steps,
                 batch_size=B,
@@ -589,21 +518,17 @@ def run_with_cis(
                 path_ta,
                 mle,
                 cov_target,
-                X_test,
-                y_test,
                 burnin_frac,
                 thin,
             )
 
             if m is not None:
-                records.append(
-                    {
-                        "rep": rep,
-                        "method": "taylor (this paper)",
-                        "batch_size": int(B),
-                        **m,
-                    }
-                )
+                records.append({
+                    "rep": rep,
+                    "method": "DQ+Exact",
+                    "batch_size": int(B),
+                    **m,
+                })
 
     df_raw = pd.DataFrame(records)
 
@@ -614,18 +539,24 @@ def run_with_cis(
             "batch_size": int(B),
         }
 
-        for m in METRICS:
-            mean, lo, hi, n = summarize_ci(sub[m].values, alpha=0.05)
-            row[f"{m}_mean"] = mean
-            row[f"{m}_lo"] = lo
-            row[f"{m}_hi"] = hi
-            row[f"{m}_n"] = n
+        mean, lo, hi, n = summarize_ci(sub["cov_frob_error"].values, alpha=0.05)
+
+        row["cov_frob_error_mean"] = mean
+        row["cov_frob_error_lo"] = lo
+        row["cov_frob_error_hi"] = hi
+        row["cov_frob_error_n"] = n
 
         rows.append(row)
 
+    method_rank = {m: k for k, m in enumerate(METHODS_ORDER)}
+
+    df_ci = pd.DataFrame(rows)
+    df_ci["method_rank"] = df_ci["method"].map(method_rank)
+
     df_ci = (
-        pd.DataFrame(rows)
-        .sort_values(["batch_size", "method"])
+        df_ci
+        .sort_values(["batch_size", "method_rank"])
+        .drop(columns=["method_rank"])
         .reset_index(drop=True)
     )
 
@@ -636,21 +567,53 @@ def make_table_with_cis(
     df_ci: pd.DataFrame,
     digits: int = 3,
 ) -> pd.DataFrame:
-    out = []
+    """
+    Public-facing covariance error table with mean + 95% CI.
+    """
+    method_rank = {m: k for k, m in enumerate(METHODS_ORDER)}
 
-    for _, r in df_ci.sort_values(["batch_size", "method"]).iterrows():
+    df_show = df_ci.copy()
+    df_show["method_rank"] = df_show["method"].map(method_rank)
+
+    out = []
+    for _, r in df_show.sort_values(["batch_size", "method_rank"]).iterrows():
         row = {
-            "method": r["method"],
             "batch_size": int(r["batch_size"]),
+            "method": r["method"],
+            "covariance_error": format_ci(
+                r["cov_frob_error_mean"],
+                r["cov_frob_error_lo"],
+                r["cov_frob_error_hi"],
+                digits,
+            ),
         }
 
-        for m in METRICS:
-            row[m] = format_ci(
-                r[f"{m}_mean"],
-                r[f"{m}_lo"],
-                r[f"{m}_hi"],
-                digits,
-            )
+        out.append(row)
+
+    return pd.DataFrame(out)
+
+
+def make_table_means_only(
+    df_ci: pd.DataFrame,
+    digits: int = 3,
+) -> pd.DataFrame:
+    """
+    Mean-only covariance error table for main-text use.
+    """
+    method_rank = {m: k for k, m in enumerate(METHODS_ORDER)}
+
+    df_show = df_ci.copy()
+    df_show["method_rank"] = df_show["method"].map(method_rank)
+
+    out = []
+    for _, r in df_show.sort_values(["batch_size", "method_rank"]).iterrows():
+        val = r["cov_frob_error_mean"]
+
+        row = {
+            "batch_size": int(r["batch_size"]),
+            "method": r["method"],
+            "covariance_error": f"{val:.{digits}f}" if np.isfinite(val) else "NA",
+        }
 
         out.append(row)
 
@@ -661,71 +624,14 @@ def make_table_with_cis(
 # 7. Plotting
 # =========================
 
-def plot_metrics_with_cis(
-    df_ci: pd.DataFrame,
-    batch_sizes: List[int],
-    savepath: Optional[str] = None,
-):
-    metrics_info = [
-        ("param_error", "Relative parameter error"),
-        ("quantile_calib_error", "Quantile-calibration RMSE"),
-        ("cov_frob_error", "Relative covariance error"),
-        ("test_nll", "Test NLL"),
-    ]
-
-    plt.figure(figsize=(21, 4.5))
-    plt.rcParams.update({"font.size": 13})
-
-    for k, (mname, ylabel) in enumerate(metrics_info, start=1):
-        plt.subplot(1, 4, k)
-
-        for method in METHODS_ORDER:
-            sub = df_ci[df_ci["method"] == method].sort_values("batch_size")
-
-            x = sub["batch_size"].values.astype(float)
-            y = sub[f"{mname}_mean"].values.astype(float)
-            lo = sub[f"{mname}_lo"].values.astype(float)
-            hi = sub[f"{mname}_hi"].values.astype(float)
-
-            yerr = np.vstack([y - lo, hi - y])
-
-            plt.errorbar(
-                x,
-                y,
-                yerr=yerr,
-                marker="o",
-                capsize=4,
-                label=method,
-            )
-
-        plt.xscale("log")
-        plt.xlabel("batch size $B$")
-        plt.ylabel(ylabel)
-        plt.title(mname)
-
-    handles, labels = plt.gca().get_legend_handles_labels()
-
-    plt.figlegend(
-        handles,
-        labels,
-        loc="lower center",
-        ncol=3,
-        bbox_to_anchor=(0.5, -0.03),
-    )
-
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
-
-    if savepath is not None:
-        plt.savefig(savepath, bbox_inches="tight")
-
-    plt.show()
-
-
 def plot_cov_error_with_cis(
     df_ci: pd.DataFrame,
     savepath: Optional[str] = None,
 ):
-    mname = "cov_frob_error"
+    """
+    Plot covariance error only.
+    """
+    metric_name = "cov_frob_error"
 
     plt.figure(figsize=(6.5, 4.8))
     plt.rcParams.update({"font.size": 13})
@@ -734,9 +640,9 @@ def plot_cov_error_with_cis(
         sub = df_ci[df_ci["method"] == method].sort_values("batch_size")
 
         x = sub["batch_size"].values.astype(float)
-        y = sub[f"{mname}_mean"].values.astype(float)
-        lo = sub[f"{mname}_lo"].values.astype(float)
-        hi = sub[f"{mname}_hi"].values.astype(float)
+        y = sub[f"{metric_name}_mean"].values.astype(float)
+        lo = sub[f"{metric_name}_lo"].values.astype(float)
+        hi = sub[f"{metric_name}_hi"].values.astype(float)
 
         yerr = np.vstack([y - lo, hi - y])
 
@@ -750,9 +656,9 @@ def plot_cov_error_with_cis(
         )
 
     plt.xscale("log")
-    plt.xlabel("batch size $B$")
-    plt.ylabel("relative Frobenius error")
-    plt.title("Covariance error, 95% CIs")
+    plt.xlabel("Batch size $B$")
+    plt.ylabel("Covariance error")
+    plt.title("Covariance error")
     plt.legend()
     plt.tight_layout()
 
@@ -763,14 +669,14 @@ def plot_cov_error_with_cis(
 
 
 # =========================
-# 8. Main: German Credit run
+# 8. Main experiment
 # =========================
 
-def main():
+if __name__ == "__main__":
+
     # ---- Config
     # Use "german.cvs" here if your file is actually named german.cvs.
     data_path = "german.csv"
-
     target_col = "Creditability"
 
     num_epochs = 500
@@ -807,7 +713,10 @@ def main():
         int(0.1 * N),
     ]
 
-    batch_sizes = [B for B in batch_sizes if B >= 2 and B < N]
+    batch_sizes = [
+        B for B in batch_sizes
+        if B >= 2 and B < N
+    ]
 
     print(f"Batch sizes: {batch_sizes}")
 
@@ -859,6 +768,7 @@ def main():
         )
 
     # ---- Learning rates for CT baseline
+    # Rule: lr = 2B/N.
     lr_list_ct = [
         2.0 * B / N
         for B in batch_sizes
@@ -882,40 +792,34 @@ def main():
         Lambda_taylor_by_idx=Lambda_taylor_by_idx,
         mle=mle,
         cov_target=scaled_sandwich,
-        X_test=X_test,
-        y_test=y_test,
         burnin_frac=burnin_frac,
         thin=thin,
     )
 
-    print("\n=== German Credit: Mean + 95% CI table ===")
+    # ---- Print covariance-error tables
+    print("\n=== German Credit: Covariance error, mean + 95% CI ===")
     table_df = make_table_with_cis(df_ci, digits=3)
     print(table_df.to_string(index=False))
 
+    print("\n=== German Credit: Covariance error, mean only ===")
+    table_mean_df = make_table_means_only(df_ci, digits=3)
+    print(table_mean_df.to_string(index=False))
+
     # ---- Save results
     df_raw.to_csv("german_credit_raw_results.csv", index=False)
-    df_ci.to_csv("german_credit_ci_results.csv", index=False)
-    table_df.to_csv("german_credit_table_with_cis.csv", index=False)
+    df_ci.to_csv("german_credit_covariance_error_summary_with_cis.csv", index=False)
+    table_df.to_csv("german_credit_covariance_error_table_with_cis.csv", index=False)
+    table_mean_df.to_csv("german_credit_covariance_error_table_means_only.csv", index=False)
 
-    # ---- Plots
-    plot_metrics_with_cis(
-        df_ci,
-        batch_sizes,
-        savepath="german_credit_compare_metrics_CIs.pdf",
-    )
-
+    # ---- Plot
     plot_cov_error_with_cis(
         df_ci,
-        savepath="german_credit_cov_error_CIs.pdf",
+        savepath="german_credit_covariance_error_CIs.pdf",
     )
 
     print("\nSaved:")
     print("  german_credit_raw_results.csv")
-    print("  german_credit_ci_results.csv")
-    print("  german_credit_table_with_cis.csv")
-    print("  german_credit_compare_metrics_CIs.pdf")
-    print("  german_credit_cov_error_CIs.pdf")
-
-
-if __name__ == "__main__":
-    main()
+    print("  german_credit_covariance_error_summary_with_cis.csv")
+    print("  german_credit_covariance_error_table_with_cis.csv")
+    print("  german_credit_covariance_error_table_means_only.csv")
+    print("  german_credit_covariance_error_CIs.pdf")
